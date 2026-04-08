@@ -1,0 +1,19 @@
+## .NET / C#
+bin/
+obj/
+*.user
+*.suo
+.vs/
+TestResults/
+*.trx
+*.coverage
+
+## Rider / JetBrains
+.idea/
+
+## Environment
+.env
+.env.local
+
+## Docker
+docker-compose.override.yml

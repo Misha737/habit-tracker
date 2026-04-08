@@ -1,0 +1,85 @@
+version: "3.9"
+
+services:
+  core-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: coredb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - core_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d coredb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  users-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: usersdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - users_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d usersdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  users-service:
+    build:
+      context: .
+      dockerfile: src/UsersService/Dockerfile
+    environment:
+      ASPNETCORE_URLS: "http://+:8080"
+      ConnectionStrings__UsersDb: "Host=users-db;Database=usersdb;Username=postgres;Password=postgres"
+    depends_on:
+      users-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  core-api:
+    build:
+      context: .
+      dockerfile: src/Api/Dockerfile
+    environment:
+      ASPNETCORE_URLS: "http://+:8080"
+      ConnectionStrings__CoreDb: "Host=core-db;Database=coredb;Username=postgres;Password=postgres"
+      UsersService__BaseUrl: "http://users-service:8080"
+    depends_on:
+      core-db:
+        condition: service_healthy
+      users-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  gateway:
+    build:
+      context: .
+      dockerfile: src/Gateway/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_URLS: "http://+:8080"
+      ReverseProxy__Clusters__core-cluster__Destinations__core-api__Address: "http://core-api:8080/"
+      ReverseProxy__Clusters__users-cluster__Destinations__users-service__Address: "http://users-service:8080/"
+    depends_on:
+      core-api:
+        condition: service_healthy
+      users-service:
+        condition: service_healthy
+
+volumes:
+  core_pgdata:
+  users_pgdata:
