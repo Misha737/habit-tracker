@@ -1,5 +1,4 @@
 version: "3.9"
-
 services:
   core-db:
     image: postgres:16-alpine
@@ -29,6 +28,36 @@ services:
       timeout: 5s
       retries: 10
 
+  notification-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: notificationdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - notification_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d notificationdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
   users-service:
     build:
       context: .
@@ -53,10 +82,36 @@ services:
       ASPNETCORE_URLS: "http://+:8080"
       ConnectionStrings__CoreDb: "Host=core-db;Database=coredb;Username=postgres;Password=postgres"
       UsersService__BaseUrl: "http://users-service:8080"
+      RabbitMQ__Host: "rabbitmq"
+      RabbitMQ__Username: "guest"
+      RabbitMQ__Password: "guest"
     depends_on:
       core-db:
         condition: service_healthy
       users-service:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  notification-svc:
+    build:
+      context: .
+      dockerfile: src/NotificationService/Dockerfile
+    environment:
+      ASPNETCORE_URLS: "http://+:8080"
+      ConnectionStrings__NotificationDb: "Host=notification-db;Database=notificationdb;Username=postgres;Password=postgres"
+      RabbitMQ__Host: "rabbitmq"
+      RabbitMQ__Username: "guest"
+      RabbitMQ__Password: "guest"
+    depends_on:
+      notification-db:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
@@ -83,3 +138,5 @@ services:
 volumes:
   core_pgdata:
   users_pgdata:
+  notification_pgdata:
+  rabbitmq_data:

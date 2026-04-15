@@ -4,6 +4,10 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace Modules.Core.Infrastructure.Migrations
 {
+    /// <summary>
+    /// Practice 5 migration: replaces owner_id (varchar) with owner_user_id (uuid).
+    /// owner_user_id references a user in UsersService (cross-service, no FK constraint).
+    /// </summary>
     public partial class AddOwnerUserId : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)

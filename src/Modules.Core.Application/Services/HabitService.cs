@@ -3,26 +3,33 @@ using Modules.Core.Application.Commands;
 using Modules.Core.Application.Dto;
 using Modules.Core.Application.Ports;
 using Modules.Core.Domain;
+using Shared.Contracts;
 
 namespace Modules.Core.Application.Services;
 
 public class HabitService
 {
-    private readonly IHabitRepository _repository;
+    private readonly IHabitRepository      _repository;
     private readonly IUserValidationClient _users;
+    private readonly IEventPublisher       _publisher;
     private readonly ILogger<HabitService> _logger;
 
     public HabitService(
-        IHabitRepository repository,
+        IHabitRepository      repository,
         IUserValidationClient users,
+        IEventPublisher       publisher,
         ILogger<HabitService> logger)
     {
         _repository = repository;
-        _users = users;
-        _logger = logger;
+        _users      = users;
+        _publisher  = publisher;
+        _logger     = logger;
     }
 
-    public async Task<HabitDto> CreateAsync(CreateHabitCommand cmd, CancellationToken ct = default)
+    public async Task<HabitDto> CreateAsync(
+        CreateHabitCommand cmd,
+        string correlationId = "",
+        CancellationToken ct = default)
     {
         bool userExists = await _users.UserExistsAsync(cmd.OwnerUserId, ct);
         if (!userExists)
@@ -38,6 +45,19 @@ public class HabitService
 
         _logger.LogInformation("Habit {HabitId} '{Name}' created for owner {OwnerId}",
             habit.Id, habit.Name, habit.OwnerUserId);
+
+        var @event = new CoreItemCreatedEvent
+        {
+            CoreItemId    = habit.Id,
+            OwnerUserId   = habit.OwnerUserId,
+            CorrelationId = correlationId,
+            Summary       = $"Habit '{habit.Name}' created"
+        };
+
+        await _publisher.PublishAsync(@event, ct);
+
+        _logger.LogInformation("Published CoreItemCreatedEvent {EventId} for habit {HabitId}",
+            @event.EventId, habit.Id);
 
         return HabitMapper.ToDto(habit);
     }
@@ -56,7 +76,7 @@ public class HabitService
         habit.ChangeStatus(cmd.NewStatus);
         await _repository.UpdateAsync(habit, ct);
 
-        _logger.LogInformation("Habit {HabitId} status changed to {Status}", habit.Id, habit.Status);
+        _logger.LogInformation("Habit {HabitId} status → {Status}", habit.Id, habit.Status);
         return HabitMapper.ToDto(habit);
     }
 

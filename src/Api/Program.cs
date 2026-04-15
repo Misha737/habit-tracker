@@ -21,12 +21,18 @@ using (var scope = app.Services.CreateScope())
 
 app.MapGet("/health", () => Results.Ok(new { service = "core", status = "healthy" }));
 
-app.MapPost("/core-items", async (CreateHabitRequest req, HabitService svc, CancellationToken ct) =>
+app.MapPost("/core-items", async (
+    CreateHabitRequest req,
+    HabitService svc,
+    HttpContext http,
+    CancellationToken ct) =>
 {
+    var correlationId = http.Request.Headers["X-Correlation-Id"].FirstOrDefault() ?? "";
+
     try
     {
         var cmd = new CreateHabitCommand(req.Name, req.Description ?? "", req.FrequencyPerWeek, req.OwnerUserId);
-        var dto = await svc.CreateAsync(cmd, ct);
+        var dto = await svc.CreateAsync(cmd, correlationId, ct);
         return Results.Created($"/core-items/{dto.Id}", dto);
     }
     catch (DomainException ex)                 { return Results.BadRequest(new { error = ex.Message }); }
