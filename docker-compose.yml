@@ -42,6 +42,20 @@ services:
       timeout: 5s
       retries: 10
 
+  workflow-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: workflowdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - workflow_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d workflowdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   rabbitmq:
     image: rabbitmq:3-management
     environment:
@@ -119,6 +133,29 @@ services:
       timeout: 5s
       retries: 6
 
+  workflow-service:
+    build:
+      context: .
+      dockerfile: src/WorkflowService/Dockerfile
+    environment:
+      ASPNETCORE_URLS: "http://+:8080"
+      ConnectionStrings__WorkflowDb: "Host=workflow-db;Database=workflowdb;Username=postgres;Password=postgres"
+      Services__CoreApiUrl: "http://core-api:8080"
+      Services__UsersServiceUrl: "http://users-service:8080"
+      Services__NotificationServiceUrl: "http://notification-svc:8080"
+    depends_on:
+      workflow-db:
+        condition: service_healthy
+      users-service:
+        condition: service_healthy
+      core-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
   gateway:
     build:
       context: .
@@ -129,14 +166,18 @@ services:
       ASPNETCORE_URLS: "http://+:8080"
       ReverseProxy__Clusters__core-cluster__Destinations__core-api__Address: "http://core-api:8080/"
       ReverseProxy__Clusters__users-cluster__Destinations__users-service__Address: "http://users-service:8080/"
+      ReverseProxy__Clusters__workflow-cluster__Destinations__workflow-service__Address: "http://workflow-service:8080/"
     depends_on:
       core-api:
         condition: service_healthy
       users-service:
+        condition: service_healthy
+      workflow-service:
         condition: service_healthy
 
 volumes:
   core_pgdata:
   users_pgdata:
   notification_pgdata:
+  workflow_pgdata:
   rabbitmq_data:

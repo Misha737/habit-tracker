@@ -1,0 +1,77 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-svc
+  namespace: habit-tracker
+spec:
+  selector:
+    app: notification-svc
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-svc
+  namespace: habit-tracker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-svc
+  template:
+    metadata:
+      labels:
+        app: notification-svc
+    spec:
+      containers:
+        - name: notification-svc
+          image: habit-tracker/notification-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ASPNETCORE_URLS
+              value: "http://+:8080"
+            - name: ConnectionStrings__NotificationDb
+              value: "Host=notification-db;Database=notificationdb;Username=postgres;Password=$(DB_PASSWORD)"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: habit-tracker-secrets
+                  key: NOTIFICATION_DB_PASSWORD
+            - name: RabbitMQ__Host
+              valueFrom:
+                configMapKeyRef:
+                  name: habit-tracker-config
+                  key: RABBITMQ_HOST
+            - name: RabbitMQ__Username
+              valueFrom:
+                configMapKeyRef:
+                  name: habit-tracker-config
+                  key: RABBITMQ_USER
+            - name: RabbitMQ__Password
+              valueFrom:
+                secretKeyRef:
+                  name: habit-tracker-secrets
+                  key: RABBITMQ_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"

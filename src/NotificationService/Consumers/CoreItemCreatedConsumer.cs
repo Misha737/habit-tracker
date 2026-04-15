@@ -31,7 +31,7 @@ public class CoreItemCreatedConsumer : IConsumer<CoreItemCreatedEvent>
         if (await _repo.ExistsByEventIdAsync(evt.EventId, context.CancellationToken))
         {
             _logger.LogWarning(
-                "Duplicate event {EventId} — already processed, skipping.", evt.EventId);
+                "Duplicate event {EventId} - already processed, skipping.", evt.EventId);
             return;
         }
 
@@ -56,7 +56,7 @@ public class CoreItemCreatedConsumer : IConsumer<CoreItemCreatedEvent>
         catch (Exception ex) when (ex.Message.Contains("unique") || ex.Message.Contains("duplicate"))
         {
             _logger.LogWarning(
-                "DB unique constraint hit for event {EventId} — skipping duplicate.", evt.EventId);
+                "DB unique constraint hit for event {EventId} - skipping duplicate.", evt.EventId);
         }
     }
 }

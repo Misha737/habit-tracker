@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: habit-tracker-config
+  namespace: habit-tracker
+data:
+  CORE_DB_HOST: "core-db"
+  CORE_DB_NAME: "coredb"
+  CORE_DB_USER: "postgres"
+  USERS_DB_HOST: "users-db"
+  USERS_DB_NAME: "usersdb"
+  USERS_DB_USER: "postgres"
+  NOTIFICATION_DB_HOST: "notification-db"
+  NOTIFICATION_DB_NAME: "notificationdb"
+  NOTIFICATION_DB_USER: "postgres"
+  WORKFLOW_DB_HOST: "workflow-db"
+  WORKFLOW_DB_NAME: "workflowdb"
+  WORKFLOW_DB_USER: "postgres"
+  RABBITMQ_HOST: "rabbitmq"
+  RABBITMQ_USER: "guest"
+  USERS_SERVICE_URL: "http://users-service:8080"
+  CORE_API_URL: "http://core-api:8080"
+  NOTIFICATION_SERVICE_URL: "http://notification-svc:8080"
+  WORKFLOW_SERVICE_URL: "http://workflow-service:8080"

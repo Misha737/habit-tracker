@@ -76,7 +76,7 @@ public class HabitService
         habit.ChangeStatus(cmd.NewStatus);
         await _repository.UpdateAsync(habit, ct);
 
-        _logger.LogInformation("Habit {HabitId} status → {Status}", habit.Id, habit.Status);
+        _logger.LogInformation("Habit {HabitId} status -> {Status}", habit.Id, habit.Status);
         return HabitMapper.ToDto(habit);
     }
 
