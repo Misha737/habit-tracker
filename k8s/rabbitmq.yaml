@@ -21,6 +21,11 @@ metadata:
   namespace: habit-tracker
 spec:
   replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: rabbitmq
@@ -51,11 +56,13 @@ spec:
               command: ["rabbitmq-diagnostics", "ping"]
             initialDelaySeconds: 10
             periodSeconds: 10
+            failureThreshold: 3
           livenessProbe:
             exec:
               command: ["rabbitmq-diagnostics", "ping"]
             initialDelaySeconds: 20
             periodSeconds: 15
+            failureThreshold: 3
           resources:
             requests:
               memory: "256Mi"

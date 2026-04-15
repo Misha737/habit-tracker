@@ -40,6 +40,8 @@ builder.Services.AddMassTransit(x =>
 
 var app = builder.Build();
 
+app.UseCorrelationId();
+
 using (var scope = app.Services.CreateScope())
     scope.ServiceProvider.GetRequiredService<NotificationDbContext>().Database.Migrate();
 

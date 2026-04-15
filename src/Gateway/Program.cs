@@ -1,3 +1,4 @@
+using Gateway;
 using Yarp.ReverseProxy.Transforms;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -14,14 +15,13 @@ builder.Services
         {
             const string header = "X-Correlation-Id";
 
-            if (!transformCtx.HttpContext.Request.Headers.TryGetValue(header, out var existing)
-                || string.IsNullOrWhiteSpace(existing))
+            if (transformCtx.HttpContext.Items.TryGetValue("CorrelationId", out var correlationIdObj) 
+                && correlationIdObj is string correlationId)
             {
-                var id = Guid.NewGuid().ToString();
-                transformCtx.ProxyRequest.Headers.TryAddWithoutValidation(header, id);
-                transformCtx.HttpContext.Response.Headers.TryAdd(header, id);
+                transformCtx.ProxyRequest.Headers.TryAddWithoutValidation(header, correlationId);
             }
-            else
+            else if (transformCtx.HttpContext.Request.Headers.TryGetValue(header, out var existing)
+                && !string.IsNullOrWhiteSpace(existing))
             {
                 transformCtx.ProxyRequest.Headers.TryAddWithoutValidation(header, existing.ToString());
             }
@@ -31,6 +31,8 @@ builder.Services
     });
 
 var app = builder.Build();
+
+app.UseCorrelationId();
 
 app.MapGet("/health", () => Results.Ok(new { service = "gateway", status = "healthy" }));
 

@@ -13,6 +13,8 @@ builder.Logging.AddConsole();
 
 var app = builder.Build();
 
+app.UseCorrelationId();
+
 using (var scope = app.Services.CreateScope())
     scope.ServiceProvider.GetRequiredService<UserDbContext>().Database.Migrate();
 

@@ -1,20 +1,20 @@
-# Practice 7 - Habit Tracker: Workflow / Saga + Kubernetes Deployment
+# Practice 8 - Habit Tracker: Production Hardening, Scaling & Observability
 
-**Stack:** .NET 8 · EF Core 8 · PostgreSQL · YARP · Kubernetes · Docker Compose
+**Stack:** .NET 8 · EF Core 8 · PostgreSQL · YARP · Kubernetes · Docker Compose · Polly
 
 ---
 
-## What changed vs Practice 6
+## What changed vs Practice 7
 
-| Area | Practice 6 | Practice 7 |
-|------|-----------|------------|
-| `WorkflowService/` | — | New Saga/Process Manager service |
-| `workflow_instances` table | — | State persistence for workflows |
-| `habit_joinings` table | — | Stores user-habit joinings |
-| Compensation path | — | Rollback on failure |
-| `k8s/` folder | — | Kubernetes manifests |
-| Gateway routes | 2 clusters | 3 clusters (+ workflow) |
-| docker-compose.yml | 7 services | 8 services (+ workflow) |
+| Area              | Practice 7    | Practice 8                                             |
+| ----------------- | ------------- | ------------------------------------------------------ |
+| Correlation ID    | —             | End-to-end propagation (Gateway → Services → RabbitMQ) |
+| Resilience        | Basic timeout | Polly retry (2x) + timeout policies                    |
+| Core API replicas | 1             | 3 (with HPA 3-6)                                       |
+| Gateway replicas  | 1             | 2 (with HPA 2-4)                                       |
+| RollingUpdate     | —             | Configured for zero-downtime deployments               |
+| Resource limits   | 512Mi/500m    | Tuned per service (256Mi/300m app, 512Mi/500m DB)      |
+| Observability     | Basic logs    | Structured logs with CorrelationId scope               |
 
 ---
 
@@ -24,110 +24,145 @@
 Client
   |
   ▼ :8080
-Gateway (YARP)
+Gateway (YARP) [2 replicas]
   |
-  ├── /core/**  ──▶  core-api ──▶ core-db
+  ├── /core/**  ──▶  core-api [3 replicas] ──▶ core-db
   │                      │
-  │                      │ publish (async)
+  │                      │ publish (async) with correlation_id header
   │                      ▼
   │                  RabbitMQ
   │                      │
   │                      ▼ consume
-  │              notification-svc ──▶ notification-db
+  │              notification-svc [2 replicas] ──▶ notification-db
   │
-  ├── /users/** ──▶ users-service ──▶ users-db
+  ├── /users/** ──▶ users-service [2 replicas] ──▶ users-db
   │
-  └── /workflows/** ──▶ workflow-service ──▶ workflow-db
+  └── /workflows/** ──▶ workflow-service [2 replicas] ──▶ workflow-db
                               │
-                              ├── calls users-service
-                              ├── calls core-api
-                              └── calls notification-svc
+                              ├── calls users-service (with Polly retry)
+                              ├── calls core-api (with Polly retry)
+                              └── calls notification-svc (with Polly retry)
 ```
 
 ---
 
-## Workflow: Join Habit
-
-Workflow type: `JoinHabit`
-
-### Steps
-
-1. **Started** - Workflow instance created
-2. **UserValidated** - Verify user exists (UsersService)
-3. **HabitValidated** - Verify habit exists (Core API)
-4. **JoiningCreated** - Create joining record
-5. **NotificationSent** - Send notification
-6. **Completed** - Success
-
-### Compensation Path
-
-If any step fails after JoiningCreated:
-- Transition to `Compensating` state
-- Cancel the joining record
-- Transition to `Compensated` state
-- Store error in `last_error`
-
-### State Machine
+## Correlation ID Flow
 
 ```
-Started → UserValidated → HabitValidated → JoiningCreated → NotificationSent → Completed
-                                              │
-                                              ▼ (on failure)
-                                        Compensating → Compensated
+┌─────────┐     ┌──────────┐     ┌──────────┐     ┌─────────┐
+│  Client │────▶│  Gateway │────▶│ Core API │────▶│ RabbitMQ│
+│         │     │(generate │     │(forward) │     │(header) │
+│         │     │ or use)  │     │          │     │         │
+└─────────┘     └──────────┘     └──────────┘     └─────────┘
+                                         │               │
+                                         ▼               ▼
+                                   ┌──────────┐     ┌─────────────┐
+                                   │Users Svc │     │Notification │
+                                   │(forward) │     │   Service   │
+                                   └──────────┘     └─────────────┘
 ```
+
+Every request:
+
+- If `X-Correlation-Id` header exists → use it
+- If not → generate new UUID
+- Forward to downstream services via HTTP headers
+- Include in RabbitMQ message headers
+- Return in response header
+- Include in all log entries via `ILogger.BeginScope`
 
 ---
 
-## Workflow Service API
+## Resilience with Polly
 
-### POST /workflows/join-habit
+### Core API → Users Service
 
-Start a new workflow to join a habit.
+```csharp
+AddPolicyHandler(GetRetryPolicy())   // 2 retries with exponential backoff
+AddPolicyHandler(GetTimeoutPolicy()) // 5 second timeout
 
-**Request:**
-```json
-{
-  "userId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "habitId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-}
+static IAsyncPolicy<HttpResponseMessage> GetRetryPolicy() =>
+    HttpPolicyExtensions
+        .HandleTransientHttpError()
+        .WaitAndRetryAsync(2, retryAttempt =>
+            TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)));
+
+static IAsyncPolicy<HttpResponseMessage> GetTimeoutPolicy() =>
+    Policy.TimeoutAsync<HttpResponseMessage>(TimeSpan.FromSeconds(5));
 ```
 
-**Response (201 Created - Success):**
-```json
-{
-  "workflowId": "b2c3d4e5-f6a7-8901-bcde-f23456789012",
-  "state": "Completed",
-  "joiningId": "c3d4e5f6-a7b8-9012-cdef-345678901234"
-}
+### Workflow Service → All Dependencies
+
+Same pattern applied to:
+
+- Users Service calls
+- Core API calls
+- Notification Service calls
+
+Timeout: 30 seconds (longer for saga operations)
+
+### HTTP Status Codes
+
+| Code | Meaning             | Trigger                                       |
+| ---- | ------------------- | --------------------------------------------- |
+| 503  | Service Unavailable | Dependency unreachable (HttpRequestException) |
+| 504  | Gateway Timeout     | Dependency timeout (TaskCanceledException)    |
+| 502  | Bad Gateway         | Dependency returns error status               |
+
+---
+
+## Kubernetes Scaling
+
+### Core API Deployment
+
+```yaml
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
 ```
 
-**Response (200 OK - Compensated):**
-```json
-{
-  "workflowId": "b2c3d4e5-f6a7-8901-bcde-f23456789012",
-  "state": "Compensated",
-  "joiningId": null
-}
+### Horizontal Pod Autoscaler (HPA)
+
+```yaml
+spec:
+  minReplicas: 3
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          averageUtilization: 80
 ```
 
-### GET /workflows/{workflowId}
+### Resource Limits
 
-Get workflow status.
+| Service          | Requests     | Limits       |
+| ---------------- | ------------ | ------------ |
+| core-api         | 128Mi / 100m | 256Mi / 300m |
+| gateway          | 128Mi / 100m | 256Mi / 300m |
+| users-service    | 128Mi / 100m | 256Mi / 300m |
+| notification-svc | 128Mi / 100m | 256Mi / 300m |
+| workflow-service | 128Mi / 100m | 256Mi / 300m |
+| \*-db            | 128Mi / 100m | 512Mi / 500m |
+| rabbitmq         | 256Mi / 100m | 512Mi / 500m |
 
-**Response:**
-```json
-{
-  "workflowId": "b2c3d4e5-f6a7-8901-bcde-f23456789012",
-  "type": "JoinHabit",
-  "state": "Completed",
-  "userId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "habitId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "joiningId": "c3d4e5f6-a7b8-9012-cdef-345678901234",
-  "createdAt": "2024-04-07T10:00:00Z",
-  "updatedAt": "2024-04-07T10:00:05Z",
-  "lastError": null
-}
-```
+### Probes
+
+All services:
+
+- **Readiness**: HTTP GET /health, initialDelay: 5s, period: 5s
+- **Liveness**: HTTP GET /health, initialDelay: 10s, period: 10s
+- **FailureThreshold**: 3
 
 ---
 
@@ -152,7 +187,6 @@ Start order: databases → rabbitmq → users-service → core-api → notificat
 ### Build Images
 
 ```bash
-# Build all images
 docker build -t habit-tracker/core-api:latest -f src/Api/Dockerfile .
 docker build -t habit-tracker/users-service:latest -f src/UsersService/Dockerfile .
 docker build -t habit-tracker/notification-service:latest -f src/NotificationService/Dockerfile .
@@ -163,21 +197,7 @@ docker build -t habit-tracker/gateway:latest -f src/Gateway/Dockerfile .
 ### Apply Manifests
 
 ```bash
-# Apply all manifests
 kubectl apply -f k8s/
-
-# Or apply individually
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/secret.yaml
-kubectl apply -f k8s/databases.yaml
-kubectl apply -f k8s/rabbitmq.yaml
-kubectl apply -f k8s/users-service.yaml
-kubectl apply -f k8s/core-api.yaml
-kubectl apply -f k8s/notification-service.yaml
-kubectl apply -f k8s/workflow-service.yaml
-kubectl apply -f k8s/gateway.yaml
-kubectl apply -f k8s/ingress.yaml
 ```
 
 ### Verify Deployment
@@ -192,14 +212,54 @@ kubectl get pods -n habit-tracker
 # Check services
 kubectl get svc -n habit-tracker
 
-# Check persistent volumes
-kubectl get pvc -n habit-tracker
+# Check HPA
+kubectl get hpa -n habit-tracker
 
-# View logs
-kubectl logs -n habit-tracker deployment/workflow-service
+# View logs with correlation ID
+kubectl logs -n habit-tracker -l app=core-api --tail=50
 
 # Port forward gateway
 kubectl port-forward -n habit-tracker svc/gateway 8080:8080
+```
+
+---
+
+## Scaling Operations
+
+### Manual Scale
+
+```bash
+# Scale core-api to 5 replicas
+kubectl scale deployment core-api --replicas=5 -n habit-tracker
+
+# Verify
+kubectl get pods -n habit-tracker -l app=core-api
+```
+
+### Rolling Update
+
+```bash
+# Update image
+kubectl set image deployment/core-api core-api=habit-tracker/core-api:v2 -n habit-tracker
+
+# Watch rollout
+kubectl rollout status deployment/core-api -n habit-tracker
+
+# Verify new pods
+kubectl get pods -n habit-tracker -l app=core-api
+```
+
+### Rollback
+
+```bash
+# Undo last rollout
+kubectl rollout undo deployment/core-api -n habit-tracker
+
+# Rollback to specific revision
+kubectl rollout undo deployment/core-api --to-revision=2 -n habit-tracker
+
+# View rollout history
+kubectl rollout history deployment/core-api -n habit-tracker
 ```
 
 ---
@@ -209,89 +269,73 @@ kubectl port-forward -n habit-tracker svc/gateway 8080:8080
 ### 1. Check all services are healthy
 
 ```bash
-# Docker Compose
-curl http://localhost:8080/health
-
-# Kubernetes (with port-forward)
 kubectl port-forward -n habit-tracker svc/gateway 8080:8080 &
 curl http://localhost:8080/health
 ```
 
-### 2. Create a user
+### 2. Verify Correlation ID propagation
 
 ```bash
-curl -X POST http://localhost:8080/users \
-  -H "Content-Type: application/json" \
-  -d '{"displayName":"Ivan","email":"ivan@test.com"}'
-# → {"id":"<USER_ID>", ...}
-```
-
-### 3. Create a habit
-
-```bash
+# Create request with custom correlation ID
 curl -X POST http://localhost:8080/core/core-items \
   -H "Content-Type: application/json" \
+  -H "X-Correlation-Id: test-correlation-123" \
   -d '{
-    "name": "Morning Run",
-    "description": "5km before work",
-    "frequencyPerWeek": 5,
-    "ownerUserId": "<USER_ID>"
-  }'
-# → 201 Created, note the habit ID
+    "name": "Test Habit",
+    "description": "Test",
+    "frequencyPerWeek": 3,
+    "ownerUserId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  }' -v
+
+# Check response header X-Correlation-Id: test-correlation-123
 ```
 
-### 4. Test Workflow Success Path
+### 3. Check logs for CorrelationId
 
 ```bash
-# Start workflow
-curl -X POST http://localhost:8080/workflows/join-habit \
-  -H "Content-Type: application/json" \
-  -d '{
-    "userId": "<USER_ID>",
-    "habitId": "<HABIT_ID>"
-  }'
-# → 201 Created with workflowId and joiningId
+# View logs from multiple pods
+kubectl logs -n habit-tracker -l app=core-api --tail=20
 
-# Check workflow status
-curl http://localhost:8080/workflows/<WORKFLOW_ID>
-# → state: "Completed"
-
-# Verify joining was created
-curl http://localhost:8080/joinings/<JOINING_ID>
-# → status: "Active"
+# Should see: [CorrelationId:test-correlation-123] Habit ... created
 ```
 
-### 5. Test Compensation Path
+### 4. Test retry behavior
 
 ```bash
-# Try to join with non-existent user (triggers compensation)
-curl -X POST http://localhost:8080/workflows/join-habit \
-  -H "Content-Type: application/json" \
-  -d '{
-    "userId": "00000000-0000-0000-0000-000000000000",
-    "habitId": "<HABIT_ID>"
-  }'
-# → 200 OK (workflow started)
+# Scale down users-service to simulate failure
+kubectl scale deployment users-service --replicas=0 -n habit-tracker
 
-# Check workflow status
-curl http://localhost:8080/workflows/<WORKFLOW_ID>
-# → state: "Compensated", lastError: "Failed at Step1"
+# Make request (should retry and eventually fail with 503)
+curl -X POST http://localhost:8080/core/core-items \
+  -H "Content-Type: application/json" \
+  -d '{...}' -w "\nHTTP Status: %{http_code}\n"
+
+# Scale back up
+kubectl scale deployment users-service --replicas=2 -n habit-tracker
 ```
 
-### 6. Test with non-existent habit
+### 5. Verify multiple replicas
 
 ```bash
-# Try to join with non-existent habit
-curl -X POST http://localhost:8080/workflows/join-habit \
-  -H "Content-Type: application/json" \
-  -d '{
-    "userId": "<USER_ID>",
-    "habitId": "00000000-0000-0000-0000-000000000000"
-  }'
+# Check multiple pods are running
+kubectl get pods -n habit-tracker -l app=core-api
 
-# Check workflow status
-curl http://localhost:8080/workflows/<WORKFLOW_ID>
-# → state: "Compensated", lastError: "Failed at Step2"
+# NAME                        READY   STATUS
+core-api-7d9f4b8c5a-abc12   1/1     Running
+core-api-7d9f4b8c5a-def34   1/1     Running
+core-api-7d9f4b8c5a-ghi56   1/1     Running
+```
+
+### 6. Test HPA (if metrics server available)
+
+```bash
+# Generate load
+for i in {1..100}; do
+  curl -s http://localhost:8080/health > /dev/null &
+done
+
+# Watch HPA scale up
+kubectl get hpa core-api-hpa -n habit-tracker -w
 ```
 
 ---
@@ -300,64 +344,51 @@ curl http://localhost:8080/workflows/<WORKFLOW_ID>
 
 ```
 k8s/
-├── namespace.yaml          # habit-tracker namespace
-├── configmap.yaml          # Non-sensitive configuration
-├── secret.yaml             # Sensitive data (passwords)
-├── databases.yaml          # 4 PostgreSQL StatefulSets
-├── rabbitmq.yaml           # RabbitMQ Deployment
-├── users-service.yaml      # Users Service Deployment
-├── core-api.yaml           # Core API Deployment
-├── notification-service.yaml # Notification Service Deployment
-├── workflow-service.yaml   # Workflow Service Deployment
-├── gateway.yaml            # Gateway Deployment + NodePort
-└── ingress.yaml            # Ingress (optional)
+├── namespace.yaml              # habit-tracker namespace
+├── configmap.yaml              # Non-sensitive configuration
+├── secret.yaml                 # Sensitive data (passwords)
+├── databases.yaml              # 4 PostgreSQL StatefulSets
+├── rabbitmq.yaml               # RabbitMQ Deployment
+├── users-service.yaml          # Users Service Deployment + HPA
+├── core-api.yaml               # Core API Deployment + HPA
+├── notification-service.yaml   # Notification Service Deployment + HPA
+├── workflow-service.yaml       # Workflow Service Deployment + HPA
+├── gateway.yaml                # Gateway Deployment + HPA
+└── ingress.yaml                # Ingress (optional)
 ```
-
-### Resource Limits
-
-Each service has:
-- **Requests:** 128Mi memory, 100m CPU
-- **Limits:** 512Mi memory, 500m CPU
-
-### Probes
-
-All services include:
-- **Readiness probe:** HTTP GET /health, initialDelay: 5s
-- **Liveness probe:** HTTP GET /health, initialDelay: 10s
-
-Databases include:
-- **Readiness probe:** pg_isready
-- **Liveness probe:** pg_isready
 
 ---
 
 ## Troubleshooting
 
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| `ImagePullBackOff` | Image not found | Build and tag images correctly |
-| `CrashLoopBackOff` | App crashes on start | Check logs: `kubectl logs <pod>` |
-| `Pending` pods | Insufficient resources | Increase node resources or reduce limits |
-| Workflow stuck | Service unreachable | Verify service names in ConfigMap |
-| PVC pending | No storage class | Check `kubectl get storageclass` |
+| Problem                | Cause                     | Fix                                                      |
+| ---------------------- | ------------------------- | -------------------------------------------------------- |
+| `ImagePullBackOff`     | Image not found           | Build and tag images correctly                           |
+| `CrashLoopBackOff`     | App crashes on start      | Check logs: `kubectl logs <pod>`                         |
+| `Pending` pods         | Insufficient resources    | Increase node resources or reduce limits                 |
+| HPA not scaling        | Metrics server missing    | Install metrics-server: `minikube addons enable metrics` |
+| Correlation ID missing | Middleware not registered | Check `app.UseCorrelationId()` in Program.cs             |
+| Retry not working      | Polly not configured      | Verify `AddPolicyHandler` calls                          |
 
 ---
 
-## Workflow State Persistence
+## Architecture Progression
 
-The `workflow_instances` table stores:
+| Practice       | Focus                                                          |
+| -------------- | -------------------------------------------------------------- |
+| Practice 4     | Modular Monolith                                               |
+| Practice 5     | Microservice Extraction                                        |
+| Practice 6     | Event-Driven Communication                                     |
+| Practice 7     | Workflow + Kubernetes                                          |
+| **Practice 8** | **Production Hardening (Correlation ID, Resilience, Scaling)** |
 
-| Column | Type | Description |
-|--------|------|-------------|
-| workflow_id | UUID | Primary key |
-| type | VARCHAR(50) | Workflow type (JoinHabit) |
-| state | VARCHAR(50) | Current state |
-| created_at | TIMESTAMP | Creation time |
-| updated_at | TIMESTAMP | Last update time |
-| last_error | TEXT | Error message if failed |
-| user_id | UUID | Target user |
-| habit_id | UUID | Target habit |
-| joining_id | UUID | Created joining (if any) |
+Your system is now production-ready with:
+
+- End-to-end observability via Correlation IDs
+- Resilient inter-service communication
+- Horizontal scaling with HPA
+- Zero-downtime deployments
+- Proper resource management
 
 ---
 

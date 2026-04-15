@@ -1,3 +1,4 @@
+using Api;
 using Microsoft.EntityFrameworkCore;
 using Modules.Core.Application.Commands;
 using Modules.Core.Application.Ports;
@@ -5,16 +6,30 @@ using Modules.Core.Application.Services;
 using Modules.Core.Domain;
 using Modules.Core.Infrastructure;
 using Modules.Core.Infrastructure.Persistence;
+using Polly;
+using Polly.Extensions.Http;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddScoped<HabitService>();
 
+builder.Services.AddHttpClient<IUserValidationClient, HttpUserValidationClient>(client =>
+{
+    var usersBaseUrl = builder.Configuration["UsersService:BaseUrl"]
+        ?? throw new InvalidOperationException("Missing UsersService:BaseUrl");
+    client.BaseAddress = new Uri(usersBaseUrl);
+    client.Timeout = TimeSpan.FromSeconds(5);
+})
+.AddPolicyHandler(GetRetryPolicy())
+.AddPolicyHandler(GetTimeoutPolicy());
+
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 
 var app = builder.Build();
+
+app.UseCorrelationId();
 
 using (var scope = app.Services.CreateScope())
     scope.ServiceProvider.GetRequiredService<HabitDbContext>().Database.Migrate();
@@ -27,7 +42,7 @@ app.MapPost("/core-items", async (
     HttpContext http,
     CancellationToken ct) =>
 {
-    var correlationId = http.Request.Headers["X-Correlation-Id"].FirstOrDefault() ?? "";
+    var correlationId = http.Items["CorrelationId"]?.ToString() ?? "";
 
     try
     {
@@ -75,6 +90,20 @@ app.MapMethods("/core-items/{id:guid}", ["PATCH"],
 });
 
 app.Run();
+
+static IAsyncPolicy<HttpResponseMessage> GetRetryPolicy()
+{
+    return HttpPolicyExtensions
+        .HandleTransientHttpError()
+        .OrResult(msg => msg.StatusCode == System.Net.HttpStatusCode.NotFound)
+        .WaitAndRetryAsync(2, retryAttempt => 
+            TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)));
+}
+
+static IAsyncPolicy<HttpResponseMessage> GetTimeoutPolicy()
+{
+    return Policy.TimeoutAsync<HttpResponseMessage>(TimeSpan.FromSeconds(5));
+}
 
 record CreateHabitRequest(string Name, string? Description, int FrequencyPerWeek, Guid OwnerUserId);
 record UpdateStatusRequest(string Status);

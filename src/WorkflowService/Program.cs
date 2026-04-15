@@ -1,4 +1,6 @@
 using Microsoft.EntityFrameworkCore;
+using Polly;
+using Polly.Extensions.Http;
 using WorkflowService.Application;
 using WorkflowService.Domain;
 using WorkflowService.Infrastructure;
@@ -25,11 +27,15 @@ var notificationServiceUrl = builder.Configuration["Services:NotificationService
 builder.Services.AddHttpClient<SagaService>(client =>
 {
     client.Timeout = TimeSpan.FromSeconds(30);
-});
+})
+.AddPolicyHandler(GetRetryPolicy())
+.AddPolicyHandler(GetTimeoutPolicy());
 
 builder.Services.AddScoped<SagaService>();
 
 var app = builder.Build();
+
+app.UseCorrelationId();
 
 using (var scope = app.Services.CreateScope())
     scope.ServiceProvider.GetRequiredService<WorkflowDbContext>().Database.Migrate();
@@ -98,6 +104,20 @@ app.MapGet("/joinings/{id:guid}", async (Guid id, IHabitJoiningRepository repo, 
 });
 
 app.Run();
+
+static IAsyncPolicy<HttpResponseMessage> GetRetryPolicy()
+{
+    return HttpPolicyExtensions
+        .HandleTransientHttpError()
+        .OrResult(msg => msg.StatusCode == System.Net.HttpStatusCode.NotFound)
+        .WaitAndRetryAsync(2, retryAttempt => 
+            TimeSpan.FromSeconds(Math.Pow(2, retryAttempt)));
+}
+
+static IAsyncPolicy<HttpResponseMessage> GetTimeoutPolicy()
+{
+    return Policy.TimeoutAsync<HttpResponseMessage>(TimeSpan.FromSeconds(30));
+}
 
 record JoinHabitRequest(Guid UserId, Guid HabitId);
 
